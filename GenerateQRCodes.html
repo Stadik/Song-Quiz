@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Song-Karten erzeugen</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 24px 16px; color: #222; }
+  textarea { width: 100%; min-height: 140px; padding: 10px; font-size: 14px; box-sizing: border-box; }
+  button { background: #e62117; color: #fff; border: 0; border-radius: 24px; padding: 12px 24px; font-size: 16px; cursor: pointer; margin: 8px 8px 8px 0; }
+  button.secondary { background: #555; }
+  label { display: inline-block; margin: 8px 16px 8px 0; }
+  input[type=number] { width: 64px; padding: 6px; }
+  #msg { color: #b00020; font-size: 14px; white-space: pre-line; }
+  #cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin-top: 20px; }
+  .card { background: #fff; border: 1px dashed #999; padding: 12px; text-align: center; break-inside: avoid; }
+  .qr { display: flex; justify-content: center; }
+  .qr img, .qr canvas { max-width: 100%; height: auto; }
+  .num { font-size: 18px; font-weight: 600; margin-top: 6px; }
+  .dl { font-size: 12px; color: #555; }
+  #list { margin-top: 28px; font-size: 13px; }
+  #list li { margin: 2px 0; word-break: break-all; }
+
+  @media print {
+    .no-print { display: none !important; }
+    body { padding: 0; max-width: none; }
+    #cards { grid-template-columns: repeat(3, 1fr); gap: 0; margin-top: 0; }
+    .qr img, .qr canvas { width: 5cm !important; height: 5cm !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="no-print">
+  <h1>🎵 Song-Karten erzeugen</h1>
+  <ol>
+    <li>Song auf YouTube suchen (am besten offizielles Video oder „Topic“-Audio) und den Link kopieren.</li>
+    <li>Links unten einfügen – <b>ein Link pro Zeile</b>.</li>
+    <li>„QR-Codes erzeugen“ klicken, dann drucken und ausschneiden.</li>
+  </ol>
+
+  <textarea id="links" placeholder="https://www.youtube.com/watch?v=...&#10;https://youtu.be/..."></textarea>
+  <div>
+    <label>Ausschnitt-Länge (Sekunden): <input id="len" type="number" value="12" min="3" max="120"></label>
+  </div>
+  <button id="go">QR-Codes erzeugen</button>
+  <button id="print" class="secondary">Drucken</button>
+  <div id="msg"></div>
+</div>
+
+<div id="cards"></div>
+
+<div id="list" class="no-print"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// play.html muss im selben Ordner wie diese Datei liegen
+const PLAYER_URL = new URL("play.html", location.href).href;
+
+function extractId(line) {
+  const m = line.match(/(?:[?&]v=|youtu\.be\/|shorts\/|embed\/|live\/)([A-Za-z0-9_-]{11})/);
+  if (m) return m[1];
+  const bare = line.trim().match(/^[A-Za-z0-9_-]{11}$/);
+  return bare ? bare[0] : null;
+}
+
+$("go").addEventListener("click", () => {
+  const lines = $("links").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  const len = Math.min(120, Math.max(3, Number($("len").value) || 12));
+  const cards = $("cards");
+  const list = $("list");
+  cards.innerHTML = "";
+  list.innerHTML = "";
+  const bad = [];
+  const ol = document.createElement("ol");
+  let n = 0;
+
+  lines.forEach((line) => {
+    const id = extractId(line);
+    if (!id) { bad.push(line); return; }
+    const idx = ++n;
+    const url = `${PLAYER_URL}?v=${id}&len=${len}`;
+
+    const card = document.createElement("div");
+    card.className = "card";
+
+    const qrBox = document.createElement("div");
+    qrBox.className = "qr";
+    card.appendChild(qrBox);
+    new QRCode(qrBox, { text: url, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M });
+
+    const num = document.createElement("div");
+    num.className = "num";
+    num.textContent = "#" + idx;
+    card.appendChild(num);
+
+    const dl = document.createElement("a");
+    dl.className = "dl no-print";
+    dl.href = "#";
+    dl.textContent = "als PNG speichern";
+    dl.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const canvas = qrBox.querySelector("canvas");
+      const a = document.createElement("a");
+      a.href = canvas.toDataURL("image/png");
+      a.download = `song-${idx}.png`;
+      a.click();
+    });
+    card.appendChild(dl);
+    cards.appendChild(card);
+
+    const li = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = `https://www.youtube.com/watch?v=${id}`;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = link.href;
+    li.appendChild(link);
+    ol.appendChild(li);
+  });
+
+  if (n) {
+    const h = document.createElement("h3");
+    h.textContent = "Zuordnung (wird nicht gedruckt)";
+    list.append(h, ol);
+  }
+  $("msg").textContent = bad.length ? `Nicht erkannt (${bad.length}):\n` + bad.join("\n") : "";
+});
+
+$("print").addEventListener("click", () => window.print());
+</script>
+</body>
+</html>

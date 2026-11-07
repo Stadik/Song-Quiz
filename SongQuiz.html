@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Song-Ratespiel</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px 16px; text-align: center; }
+  #playerWrap { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 12px; overflow: hidden; }
+  #playBtn { font-size: 22px; padding: 18px 40px; border: 0; border-radius: 40px; background: #e62117; color: #fff; cursor: pointer; margin: 20px 0 8px; }
+  #playBtn:disabled { opacity: .5; cursor: default; }
+  #title { font-size: 20px; font-weight: 600; min-height: 1.4em; margin-top: 12px; }
+  #status { font-size: 14px; opacity: .7; min-height: 1.4em; }
+</style>
+</head>
+<body>
+
+<h2>🎵 Song-Ratespiel</h2>
+<div id="playerWrap"><div id="player"></div></div>
+<button id="playBtn" disabled>▶️ Abspielen</button>
+<div id="title"></div>
+<div id="status">Lade Player …</div>
+
+<script>
+// URL-Parameter: ?v=VIDEO_ID&len=SEKUNDEN
+const params = new URLSearchParams(location.search);
+const VIDEO_ID = params.get("v") || "";
+const SNIPPET_S = Math.min(120, Math.max(3, Number(params.get("len")) || 12));
+const END_BUFFER_S = 5;  // nicht in den letzten Sekunden des Songs starten
+const MIN_SONG_S = 45;   // alles Kürzere (oder mit anderer Video-ID) gilt als Werbung
+const GIVE_UP_S = 90;    // so lange auf den Song warten, dann trotzdem weitermachen
+const TICK_MS = 250;
+
+const btn = document.getElementById("playBtn");
+const statusEl = document.getElementById("status");
+const titleEl = document.getElementById("title");
+
+let player, phase = "idle", loop = null, wakeLock = null;
+let waited = 0, sought = false, seekedAt = 0, played = 0, adMuted = false, assumeSong = false;
+
+if (!/^[A-Za-z0-9_-]{11}$/.test(VIDEO_ID)) {
+  statusEl.textContent = "Ungültiger Link: Video-ID fehlt oder ist fehlerhaft.";
+} else {
+  const s = document.createElement("script");
+  s.src = "https://www.youtube.com/iframe_api";
+  document.head.appendChild(s);
+}
+
+window.onYouTubeIframeAPIReady = () => {
+  player = new YT.Player("player", {
+    host: "https://www.youtube-nocookie.com", // Datenschutz-Modus: keine personalisierte Werbung
+    width: "100%",
+    height: "100%",
+    videoId: VIDEO_ID,
+    playerVars: { playsinline: 1, rel: 0, modestbranding: 1 },
+    events: {
+      onReady: () => { btn.disabled = false; statusEl.textContent = "Bereit"; },
+      onError,
+    },
+  });
+};
+
+function onError(e) {
+  endRound([101, 150].includes(e.data)
+    ? "Dieses Video darf nicht eingebettet werden – bitte ein anderes Video verwenden."
+    : `YouTube-Fehler (${e.data}).`);
+}
+
+// Läuft gerade der echte Song (und keine Werbung)?
+function looksLikeSong() {
+  if (assumeSong) return true;
+  try {
+    const id = (player.getVideoData() || {}).video_id;
+    if (id && id !== VIDEO_ID) return false;
+    return player.getDuration() >= MIN_SONG_S;
+  } catch { return false; }
+}
+
+function endRound(msg, label) {
+  clearInterval(loop);
+  phase = "idle";
+  btn.disabled = false;
+  if (label) btn.textContent = label;
+  statusEl.textContent = msg;
+  wakeLock?.release().catch(() => {});
+}
+
+function finish() {
+  player.pauseVideo();
+  endRound("⏸️ Pausiert", "🔁 Nochmal (neue Stelle)");
+}
+
+// Mobile Browser erlauben Autoplay nur nach einem Tipp -> Button
+btn.addEventListener("click", () => {
+  clearInterval(loop);
+  phase = "loading"; waited = 0; sought = false; played = 0; adMuted = false; assumeSong = false;
+  btn.disabled = true;
+  statusEl.textContent = "Lade …";
+  player.mute();       // stumm starten, damit man den Songanfang nicht hört
+  player.playVideo();
+  navigator.wakeLock?.request("screen").then((l) => { wakeLock = l; }).catch(() => {});
+  loop = setInterval(tick, TICK_MS);
+});
+
+function tick() {
+  const state = player.getPlayerState();
+  const PLAYING = YT.PlayerState.PLAYING;
+
+  if (phase === "loading") {
+    waited += TICK_MS / 1000;
+    if (waited > GIVE_UP_S && state !== PLAYING) {
+      endRound("Wiedergabe startet nicht – bitte nochmal tippen.", "▶️ Nochmal versuchen");
+      return;
+    }
+    if (state !== PLAYING) return;
+
+    if (!sought) {
+      if (waited > GIVE_UP_S) assumeSong = true;  // sehr kurzes Video: nicht ewig warten
+      if (!looksLikeSong()) {
+        statusEl.textContent = "Werbung läuft – gleich geht's weiter …";
+        return;
+      }
+      // Jetzt ist die echte Songdauer bekannt -> zufällige Position wählen
+      const maxStart = Math.max(0, player.getDuration() - SNIPPET_S - END_BUFFER_S);
+      sought = true;
+      seekedAt = Date.now();
+      player.seekTo(Math.floor(Math.random() * maxStart), true);
+      return;
+    }
+
+    if (Date.now() - seekedAt < 800) return;  // kurz warten, bis der Sprung angekommen ist
+    phase = "playing";
+    played = 0;
+    player.unMute();
+    titleEl.textContent = player.getVideoData().title || "";
+    statusEl.textContent = `▶️ Läuft (${SNIPPET_S} s)`;
+    return;
+  }
+
+  if (phase === "playing") {
+    if (state === YT.PlayerState.ENDED) { finish(); return; }
+    if (state !== PLAYING) return;
+
+    if (looksLikeSong()) {
+      if (adMuted) { player.unMute(); adMuted = false; statusEl.textContent = `▶️ Läuft (${SNIPPET_S} s)`; }
+      played += TICK_MS / 1000;           // nur echte Songzeit zählt, Werbung nicht
+      if (played >= SNIPPET_S) finish();
+    } else {
+      if (!adMuted) { player.mute(); adMuted = true; }
+      statusEl.textContent = "Werbung läuft – gleich geht's weiter …";
+    }
+  }
+}
+</script>
+</body>
+</html>
