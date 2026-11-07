@@ -7,7 +7,9 @@
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px 16px; text-align: center; }
-  #playerWrap { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 12px; overflow: hidden; }
+  #playerWrap { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 12px; overflow: hidden; }
+  #cover { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; text-align: center; padding: 16px;
+           font-size: 28px; font-weight: 600; color: #fff; cursor: pointer; background: linear-gradient(135deg, #e62117, #7b1fa2); }
   #playBtn { font-size: 22px; padding: 18px 40px; border: 0; border-radius: 40px; background: #e62117; color: #fff; cursor: pointer; margin: 20px 0 8px; }
   #playBtn:disabled { opacity: .5; cursor: default; }
   #title { font-size: 20px; font-weight: 600; min-height: 1.4em; margin-top: 12px; }
@@ -17,7 +19,7 @@
 <body>
 
 <h2>🎵 Song-Ratespiel</h2>
-<div id="playerWrap"><div id="player"></div></div>
+<div id="playerWrap"><div id="player"></div><div id="cover">Lade Player …</div></div>
 <button id="playBtn" disabled>▶️ Abspielen</button>
 <div id="title"></div>
 <div id="status">Lade Player …</div>
@@ -31,12 +33,15 @@ const END_BUFFER_S = 5;  // nicht in den letzten Sekunden des Songs starten
 const MIN_SONG_S = 45;   // alles Kürzere (oder mit anderer Video-ID) gilt als Werbung
 const GIVE_UP_S = 90;    // so lange auf den Song warten, dann trotzdem weitermachen
 const TICK_MS = 250;
+const SHOW_TITLE_IMMEDIATELY = false; // false: Titel und Video erscheinen erst nach dem Ausschnitt
 
 const btn = document.getElementById("playBtn");
 const statusEl = document.getElementById("status");
 const titleEl = document.getElementById("title");
+const coverEl = document.getElementById("cover");
 
 let player, phase = "idle", loop = null, wakeLock = null;
+let songTitle = "";
 let waited = 0, sought = false, seekedAt = 0, played = 0, adMuted = false, assumeSong = false;
 
 if (!/^[A-Za-z0-9_-]{11}$/.test(VIDEO_ID)) {
@@ -55,7 +60,7 @@ window.onYouTubeIframeAPIReady = () => {
     videoId: VIDEO_ID,
     playerVars: { playsinline: 1, rel: 0, modestbranding: 1 },
     events: {
-      onReady: () => { btn.disabled = false; statusEl.textContent = "Bereit"; },
+      onReady: () => { btn.disabled = false; statusEl.textContent = "Bereit"; coverEl.textContent = "▶️ Tippen zum Starten"; },
       onError,
     },
   });
@@ -83,25 +88,37 @@ function endRound(msg, label) {
   btn.disabled = false;
   if (label) btn.textContent = label;
   statusEl.textContent = msg;
+  coverEl.style.display = "flex";
+  coverEl.textContent = "▶️ Tippen zum Starten";
   wakeLock?.release().catch(() => {});
 }
 
 function finish() {
   player.pauseVideo();
   endRound("⏸️ Pausiert", "🔁 Nochmal (neue Stelle)");
+  coverEl.style.display = "none";   // Video aufdecken
+  titleEl.textContent = songTitle;  // Titel anzeigen
 }
 
 // Mobile Browser erlauben Autoplay nur nach einem Tipp -> Button
-btn.addEventListener("click", () => {
+function start() {
   clearInterval(loop);
   phase = "loading"; waited = 0; sought = false; played = 0; adMuted = false; assumeSong = false;
   btn.disabled = true;
   statusEl.textContent = "Lade …";
+  coverEl.style.display = "flex";
+  coverEl.textContent = "🎵 Welcher Song ist das?";
+  titleEl.textContent = "";
+  songTitle = "";
   player.mute();       // stumm starten, damit man den Songanfang nicht hört
   player.playVideo();
   navigator.wakeLock?.request("screen").then((l) => { wakeLock = l; }).catch(() => {});
   loop = setInterval(tick, TICK_MS);
-});
+}
+
+btn.addEventListener("click", start);
+// Der ganze Videobereich ist eine große Start-Fläche
+coverEl.addEventListener("click", () => { if (phase === "idle" && !btn.disabled) start(); });
 
 function tick() {
   const state = player.getPlayerState();
@@ -133,7 +150,8 @@ function tick() {
     phase = "playing";
     played = 0;
     player.unMute();
-    titleEl.textContent = player.getVideoData().title || "";
+    songTitle = player.getVideoData().title || "";
+    if (SHOW_TITLE_IMMEDIATELY) titleEl.textContent = songTitle;
     statusEl.textContent = `▶️ Läuft (${SNIPPET_S} s)`;
     return;
   }
