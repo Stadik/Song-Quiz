@@ -8,12 +8,16 @@
 <style>
   :root { color-scheme: light; }
   body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 24px 16px; color: #222; }
-  textarea { width: 100%; min-height: 160px; padding: 10px; font-size: 14px; box-sizing: border-box; }
+  textarea { width: 100%; min-height: 170px; padding: 10px; font-size: 14px; box-sizing: border-box; }
   button { background: #e62117; color: #fff; border: 0; border-radius: 24px; padding: 12px 24px; font-size: 16px; cursor: pointer; margin: 8px 8px 8px 0; }
+  button:disabled { opacity: .5; cursor: default; }
   button.secondary { background: #555; }
+  button.mini { padding: 2px 12px; font-size: 14px; margin: 0; }
   label { display: inline-block; margin: 8px 16px 8px 0; }
   input[type=number] { width: 64px; padding: 6px; }
+  select { max-width: 100%; padding: 4px; margin-top: 4px; }
   code { background: #f1f1f1; padding: 1px 4px; border-radius: 3px; }
+  #progress { color: #555; font-size: 14px; min-height: 1.3em; }
   #msg { color: #b00020; font-size: 14px; white-space: pre-line; }
   #sheets { margin-top: 20px; overflow-x: auto; }
   .sheet-label { font-size: 13px; color: #555; margin: 12px 0 4px; }
@@ -33,7 +37,7 @@
   @media screen { .card.back { outline: 1px dotted #ddd; } }
 
   #list { margin-top: 28px; font-size: 13px; }
-  #list li { margin: 3px 0; word-break: break-all; }
+  #list li { margin: 8px 0; }
 
   @media print {
     @page { size: A4; margin: 0; }
@@ -50,17 +54,18 @@
 <div class="no-print">
   <h1>🎵 Song-Karten erzeugen</h1>
   <ol>
-    <li>Song auf YouTube suchen (am besten offizielles Video oder „Topic“-Audio) und den Link kopieren.</li>
-    <li>Pro Zeile ein Song im Format <code>Link; Titel; Interpret; Jahr</code> (mit Semikolon getrennt). Titel, Interpret und Jahr stehen später auf der Rückseite. Man kann die Zeilen auch aus einer Tabelle (Excel, Google Sheets) hineinkopieren.</li>
-    <li>„Karten erzeugen“ klicken und drucken.</li>
+    <li>Pro Zeile ein Song: <code>Titel; Interpret</code> (optional <code>; Jahr</code>). Das Programm sucht bei Apple die 30-Sekunden-Hörprobe.</li>
+    <li>Gibt es keine Hörprobe, geht auch YouTube: <code>Link; Titel; Interpret; Jahr</code>.</li>
+    <li>„Karten erzeugen“ klicken, die Treffer kontrollieren (Auswahlliste, ▶ zum Anhören) und drucken.</li>
   </ol>
 
-  <textarea id="links" placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ; Never Gonna Give You Up; Rick Astley; 1987&#10;https://youtu.be/XXXXXXXXXXX; Titel; Interpret; Jahr"></textarea>
+  <textarea id="links" placeholder="Smells Like Teen Spirit; Nirvana&#10;Wonderwall; Oasis; 1995&#10;https://youtu.be/XXXXXXXXXXX; Titel; Interpret; Jahr"></textarea>
   <div>
-    <label>Ausschnitt-Länge (Sekunden): <input id="len" type="number" value="12" min="3" max="120"></label>
+    <label>Ausschnitt-Länge in Sekunden (nur für YouTube-Songs): <input id="len" type="number" value="12" min="3" max="120"></label>
   </div>
   <button id="go">Karten erzeugen</button>
   <button id="print" class="secondary">Drucken</button>
+  <div id="progress"></div>
   <div id="msg"></div>
 
   <details style="margin-top:12px; font-size:14px;">
@@ -70,6 +75,7 @@
       <li><b>Doppelseitig:</b> im Druckdialog „Beidseitig“ wählen und an der <b>langen Kante</b> wenden. Dann liegen Code und Lösung genau hinter­einander.</li>
       <li><b>Oder einzeln:</b> Vorder- und Rückseiten als getrennte Blätter drucken, den Rückseiten-Bogen umdrehen wie eine Buchseite, aufkleben und ausschneiden.</li>
       <li>Skalierung auf <b>100 %</b> (nicht „Anpassen“) stellen und Kopf-/Fußzeilen ausschalten.</li>
+      <li>Das Jahr kommt von Apple (Veröffentlichung des Albums). Bei Neuauflagen oder Sammlern kann es abweichen: dann in der Auswahlliste die Original-Version wählen oder das Jahr als dritte Angabe eintragen.</li>
     </ul>
   </details>
 </div>
@@ -80,22 +86,91 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-// play.html muss im selben Ordner wie diese Datei liegen
-const PLAYER_URL = new URL("play.html", location.href).href;
+// play.html (YouTube) und apple.html (Apple) müssen im selben Ordner wie diese Datei liegen
+const PLAYER_YT_URL = new URL("play.html", location.href).href;
+const PLAYER_APPLE_URL = new URL("apple.html", location.href).href;
 const COLS = 3, ROWS = 4, PER_PAGE = COLS * ROWS;
+const SEARCH_DELAY_MS = 3200; // Apple erlaubt etwa 20 Anfragen pro Minute
+const BAD_WORDS = /karaoke|tribute|made famous|originally performed|instrumental|in the style of|cover version|lullaby|8-bit|piano version|party tyme/i;
 
-function extractId(text) {
-  const m = text.match(/(?:[?&]v=|youtu\.be\/|shorts\/|embed\/|live\/)([A-Za-z0-9_-]{11})/);
-  if (m) return m[1];
-  const bare = text.trim().match(/^[A-Za-z0-9_-]{11}$/);
-  return bare ? bare[0] : null;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const norm = (s) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
 }
 
-// "Link; Titel; Interpret; Jahr" (auch Tab oder |) -> Objekt
+// ---- Apple-Suche per JSONP (normale Anfragen blockiert der Browser wegen CORS) ----
+let jsonpCounter = 0;
+function jsonp(url, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const name = "__itunes_cb_" + ++jsonpCounter;
+    const s = document.createElement("script");
+    const cleanup = () => { delete window[name]; s.remove(); clearTimeout(timer); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error("Zeitüberschreitung")); }, timeoutMs);
+    window[name] = (data) => { cleanup(); resolve(data); };
+    s.onerror = () => { cleanup(); reject(new Error("Netzwerkfehler")); };
+    s.src = url + "&callback=" + name;
+    document.head.appendChild(s);
+  });
+}
+
+async function searchApple(title, artist) {
+  const term = [title, artist].filter(Boolean).join(" ");
+  if (!term) return [];
+  const data = await jsonp(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=10&country=AT`);
+  const nt = norm(title), na = norm(artist);
+  const list = (data.results || []).filter((r) => r.trackId && r.previewUrl).map((r, i) => {
+    const nName = norm(r.trackName), nArt = norm(r.artistName);
+    let score = 0;
+    if (na && (nArt.includes(na) || na.includes(nArt))) score += 2;
+    if (nt && nName.includes(nt)) score += 2;
+    if (BAD_WORDS.test(`${r.trackName} ${r.collectionName} ${r.artistName}`)) score -= 5; // Karaoke, Tribute usw. nach hinten
+    return {
+      score, i, trackId: r.trackId, trackName: r.trackName || "", artistName: r.artistName || "",
+      collectionName: r.collectionName || "", year: (r.releaseDate || "").slice(0, 4), previewUrl: r.previewUrl,
+    };
+  });
+  list.sort((a, b) => b.score - a.score || a.i - b.i);
+  return list.slice(0, 8);
+}
+
+// ---- Eingabe ----
+function extractYoutubeId(text) {
+  if (!/youtu/i.test(text)) return null;
+  const m = text.match(/(?:[?&]v=|youtu\.be\/|shorts\/|embed\/|live\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+// "Titel; Interpret; Jahr" (Apple) oder "Link; Titel; Interpret; Jahr" (YouTube); Trenner auch Tab oder |
 function parseLine(line) {
   const parts = line.split(/\t|;|\|/).map((s) => s.trim());
-  return { id: extractId(parts[0] || ""), title: parts[1] || "", artist: parts[2] || "", year: parts[3] || "" };
+  const id = extractYoutubeId(parts[0] || "");
+  if (id) return { kind: "yt", id, title: parts[1] || "", artist: parts[2] || "", yearTyped: parts[3] || "" };
+  return { kind: "apple", title: parts[0] || "", artist: parts[1] || "", yearTyped: parts[2] || "" };
 }
+
+// Anzeige-Daten eines Songs (Getipptes hat Vorrang, sonst die Daten von Apple)
+function view(s) {
+  if (s.kind === "yt") {
+    return { title: s.title, artist: s.artist, year: s.yearTyped, url: `${PLAYER_YT_URL}?v=${s.id}&len=${s.len}` };
+  }
+  const c = s.candidates[s.sel];
+  const year = s.yearTyped || c.year;
+  return {
+    title: s.title || c.trackName,
+    artist: s.artist || c.artistName,
+    year,
+    url: `${PLAYER_APPLE_URL}?a=${c.trackId}${year ? "&y=" + encodeURIComponent(year) : ""}`,
+  };
+}
+
+// ---- Bögen ----
+let songs = [];
+const qrCanvases = [];
 
 // Rückseiten-Reihenfolge: Spalten spiegeln, damit die Karten beim Wenden an der langen Kante deckungsgleich liegen
 function backLayout(chunk) {
@@ -105,13 +180,6 @@ function backLayout(chunk) {
     slots[row * COLS + (COLS - 1 - col)] = song;
   });
   return slots;
-}
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
 }
 
 function makeSheet(label) {
@@ -125,42 +193,28 @@ function makeSheet(label) {
   return grid;
 }
 
-const qrCanvases = [];
-
-function frontCard(song) {
+function frontCard(s) {
   const card = el("div", "card front");
   const box = el("div", "qr");
   card.appendChild(box);
-  new QRCode(box, { text: song.url, width: 300, height: 300, correctLevel: QRCode.CorrectLevel.M });
-  qrCanvases[song.n] = box.querySelector("canvas");
+  new QRCode(box, { text: view(s).url, width: 300, height: 300, correctLevel: QRCode.CorrectLevel.M });
+  qrCanvases[s.n] = box.querySelector("canvas");
   return card;
 }
 
-function backCard(song) {
+function backCard(s) {
+  const v = view(s);
   const card = el("div", "card back");
-  card.appendChild(el("div", "year", song.year));
-  card.appendChild(el("div", "artist", song.artist));
-  card.appendChild(el("div", "songtitle", song.title));
-  card.appendChild(el("div", "cnum", "#" + song.n));
+  card.appendChild(el("div", "year", v.year));
+  card.appendChild(el("div", "artist", v.artist));
+  card.appendChild(el("div", "songtitle", v.title));
+  card.appendChild(el("div", "cnum", "#" + s.n));
   return card;
 }
 
-$("go").addEventListener("click", () => {
-  const lines = $("links").value.split("\n").map((s) => s.trim()).filter(Boolean);
-  const len = Math.min(120, Math.max(3, Number($("len").value) || 12));
+function renderSheets() {
   $("sheets").innerHTML = "";
-  $("list").innerHTML = "";
   qrCanvases.length = 0;
-
-  const songs = [], bad = [];
-  lines.forEach((line) => {
-    const p = parseLine(line);
-    if (!p.id) { bad.push(line); return; }
-    p.n = songs.length + 1;
-    p.url = `${PLAYER_URL}?v=${p.id}&len=${len}`;
-    songs.push(p);
-  });
-
   for (let start = 0; start < songs.length; start += PER_PAGE) {
     const chunk = songs.slice(start, start + PER_PAGE);
     const page = start / PER_PAGE + 1;
@@ -169,37 +223,113 @@ $("go").addEventListener("click", () => {
     chunk.forEach((s) => front.appendChild(frontCard(s)));
     backLayout(chunk).forEach((s) => back.appendChild(s ? backCard(s) : el("div", "card")));
   }
+}
 
-  if (songs.length) {
-    const h = el("h3", null, "Übersicht (wird nicht gedruckt)");
-    const ol = el("ol");
-    songs.forEach((s) => {
-      const li = el("li");
-      li.append(`${s.artist || "?"} – ${s.title || "?"} ${s.year ? "(" + s.year + ")" : ""} · `);
-      const a = el("a", null, "YouTube");
+// ---- Kontrollliste ----
+const previewAudio = new Audio();
+let previewUrl = "", previewBtn = null;
+function togglePreview(btn, url) {
+  if (previewBtn) previewBtn.textContent = "▶";
+  if (previewUrl === url && !previewAudio.paused) { previewAudio.pause(); return; }
+  previewUrl = url;
+  previewBtn = btn;
+  previewAudio.src = url;
+  previewAudio.play().catch(() => {});
+  btn.textContent = "⏸";
+  previewAudio.onended = () => { btn.textContent = "▶"; };
+}
+
+function renderList() {
+  const list = $("list");
+  list.innerHTML = "";
+  if (!songs.length) return;
+  list.appendChild(el("h3", null, "Übersicht und Kontrolle (wird nicht gedruckt)"));
+  const ol = el("ol");
+  songs.forEach((s) => {
+    const li = el("li");
+    const sum = el("b");
+    const updateSum = () => {
+      const v = view(s);
+      sum.textContent = `${v.artist || "?"} – ${v.title || "?"} (${v.year || "?"})`;
+    };
+    updateSum();
+    li.appendChild(sum);
+
+    if (s.kind === "apple") {
+      const sel = document.createElement("select");
+      s.candidates.forEach((c, i) => {
+        const o = document.createElement("option");
+        o.value = String(i);
+        o.textContent = `${c.trackName} – ${c.artistName} · ${c.collectionName} (${c.year})`;
+        sel.appendChild(o);
+      });
+      sel.selectedIndex = s.sel;
+      sel.addEventListener("change", () => { s.sel = sel.selectedIndex; updateSum(); renderSheets(); });
+      const play = el("button", "mini", "▶");
+      play.title = "Hörprobe anhören";
+      play.addEventListener("click", () => togglePreview(play, s.candidates[s.sel].previewUrl));
+      li.append(el("br"), sel, " ", play);
+    } else {
+      const a = el("a", null, "YouTube-Video");
       a.href = `https://www.youtube.com/watch?v=${s.id}`;
       a.target = "_blank";
       a.rel = "noopener";
-      li.appendChild(a);
-      li.append(" · ");
-      const dl = el("a", null, "QR als PNG");
-      dl.href = "#";
-      dl.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        const c = qrCanvases[s.n];
-        const x = document.createElement("a");
-        x.href = c.toDataURL("image/png");
-        x.download = `song-${s.n}.png`;
-        x.click();
-      });
-      li.appendChild(dl);
-      ol.appendChild(li);
-    });
-    $("list").append(h, ol);
-  }
-  $("msg").textContent = bad.length ? `Nicht erkannt (${bad.length}) – der Link muss am Zeilenanfang stehen:\n` + bad.join("\n") : "";
-});
+      li.append(" · ", a);
+    }
 
+    const dl = el("a", null, "QR als PNG");
+    dl.href = "#";
+    dl.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const x = document.createElement("a");
+      x.href = qrCanvases[s.n].toDataURL("image/png");
+      x.download = `song-${s.n}.png`;
+      x.click();
+    });
+    li.append(" · ", dl);
+    ol.appendChild(li);
+  });
+  list.appendChild(ol);
+}
+
+// ---- Ablauf ----
+async function run() {
+  const lines = $("links").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  if (!lines.length) { $("msg").textContent = "Bitte zuerst Songs eintragen."; return; }
+  const len = Math.min(120, Math.max(3, Number($("len").value) || 12));
+  $("go").disabled = true;
+  $("msg").textContent = "";
+  $("sheets").innerHTML = "";
+  $("list").innerHTML = "";
+
+  const entries = lines.map(parseLine);
+  entries.forEach((e) => { if (e.kind === "yt") e.len = len; });
+  const todo = entries.filter((e) => e.kind === "apple");
+  const missing = [];
+  try {
+    for (let i = 0; i < todo.length; i++) {
+      const e = todo[i];
+      if (i > 0) await sleep(SEARCH_DELAY_MS);
+      $("progress").textContent = `Suche bei Apple … ${i + 1}/${todo.length}: ${e.title}`;
+      try { e.candidates = await searchApple(e.title, e.artist); } catch { e.candidates = []; }
+      e.sel = 0;
+      if (!e.candidates.length) missing.push(e);
+    }
+    songs = entries.filter((e) => e.kind === "yt" || e.candidates.length);
+    songs.forEach((s, i) => { s.n = i + 1; });
+    renderSheets();
+    renderList();
+    if (missing.length) {
+      $("msg").textContent = `Keine Hörprobe gefunden (${missing.length}). Bitte anders schreiben oder einen YouTube-Link verwenden:\n` +
+        missing.map((e) => [e.title, e.artist].filter(Boolean).join("; ")).join("\n");
+    }
+  } finally {
+    $("progress").textContent = "";
+    $("go").disabled = false;
+  }
+}
+
+$("go").addEventListener("click", () => { run(); });
 $("print").addEventListener("click", () => window.print());
 </script>
 </body>
