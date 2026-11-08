@@ -8,10 +8,12 @@
   :root { color-scheme: light dark; }
   body { font-family: system-ui, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px 16px; text-align: center; }
   #playerWrap { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 12px; overflow: hidden; }
+  /* Die Abdeckung ist nur optisch: Berührungen gehen "durch" direkt an den YouTube-Player.
+     Nur ein Tipp direkt im Player zählt für den Browser als echte Nutzeraktion (Ton/Autoplay). */
   #cover { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; text-align: center; padding: 16px;
-           font-size: 28px; font-weight: 600; color: #fff; cursor: pointer; white-space: pre-line; background: linear-gradient(135deg, #e62117, #7b1fa2); }
-  #playBtn { font-size: 22px; padding: 18px 40px; border: 0; border-radius: 40px; background: #e62117; color: #fff; cursor: pointer; margin: 20px 0 8px; }
-  #playBtn:disabled { opacity: .5; cursor: default; }
+           font-size: 28px; font-weight: 600; color: #fff; pointer-events: none; white-space: pre-line;
+           background: linear-gradient(135deg, #e62117, #7b1fa2); }
+  #playBtn { font-size: 18px; padding: 14px 32px; border: 0; border-radius: 40px; background: #e62117; color: #fff; cursor: pointer; margin: 20px 0 8px; }
   #title { font-size: 20px; font-weight: 600; min-height: 1.4em; margin-top: 12px; }
   #status { font-size: 14px; opacity: .7; min-height: 1.4em; }
 </style>
@@ -20,7 +22,7 @@
 
 <h2>🎵 Song-Ratespiel</h2>
 <div id="playerWrap"><div id="player"></div><div id="cover">Lade Player …</div></div>
-<button id="playBtn" disabled>▶️ Abspielen</button>
+<button id="playBtn" style="display:none">🔁 Nochmal (neue Stelle)</button>
 <div id="title"></div>
 <div id="status">Lade Player …</div>
 
@@ -33,21 +35,21 @@ const END_BUFFER_S = 5;  // nicht in den letzten Sekunden des Songs starten
 const MIN_SONG_S = 45;   // alles Kürzere (oder mit anderer Video-ID) gilt als Werbung
 const GIVE_UP_S = 90;    // so lange auf den Song warten, dann trotzdem weitermachen
 const TICK_MS = 250;
-const COVER_HINT = "🎵 Welcher Song ist das?\n(Kein Ton? Hier tippen)";
 const SHOW_TITLE_IMMEDIATELY = false; // false: Titel und Video erscheinen erst nach dem Ausschnitt
+const COVER_TEXT = "🎵 Welcher Song ist das?";
 
 const btn = document.getElementById("playBtn");
 const statusEl = document.getElementById("status");
 const titleEl = document.getElementById("title");
 const coverEl = document.getElementById("cover");
 
-let player, phase = "idle", loop = null, wakeLock = null;
-let songTitle = "";
-let pausedTicks = 0, coverPrompt = false;
-let waited = 0, sought = false, seekedAt = 0, played = 0, adMuted = false, assumeSong = false;
+let player, phase = "init", loop = null, wakeLock = null;
+let songTitle = "", pausedTicks = 0, coverPrompt = false;
+let waited = 0, sought = false, seekedAt = 0, played = 0, silenced = false, assumeSong = false;
 
 if (!/^[A-Za-z0-9_-]{11}$/.test(VIDEO_ID)) {
   statusEl.textContent = "Ungültiger Link: Video-ID fehlt oder ist fehlerhaft.";
+  coverEl.textContent = "⚠️";
 } else {
   const s = document.createElement("script");
   s.src = "https://www.youtube.com/iframe_api";
@@ -61,17 +63,28 @@ window.onYouTubeIframeAPIReady = () => {
     height: "100%",
     videoId: VIDEO_ID,
     playerVars: { playsinline: 1, rel: 0, modestbranding: 1 },
-    events: {
-      onReady: () => { btn.disabled = false; statusEl.textContent = "Bereit"; coverEl.textContent = "▶️ Tippen zum Starten"; },
-      onError,
-    },
+    events: { onReady, onStateChange, onError },
   });
 };
+
+function onReady() {
+  // Lautlos vorbereiten. Lautstärke 0 statt "stumm": das darf der Browser später wieder anheben,
+  // das Aufheben einer Stummschaltung per Code wird dagegen oft blockiert (z. B. DuckDuckGo).
+  player.setVolume(0);
+  phase = "ready";
+  coverEl.textContent = "▶️ Tippen zum Starten";
+  statusEl.textContent = "Bereit – einfach auf das Feld tippen";
+}
+
+// Der Nutzer tippt direkt in den Player -> Wiedergabe beginnt -> Runde starten
+function onStateChange(e) {
+  if (e.data === YT.PlayerState.PLAYING && (phase === "ready" || phase === "done")) startRound();
+}
 
 function onError(e) {
   endRound([101, 150].includes(e.data)
     ? "Dieses Video darf nicht eingebettet werden – bitte ein anderes Video verwenden."
-    : `YouTube-Fehler (${e.data}).`);
+    : `YouTube-Fehler (${e.data}).`, true);
 }
 
 // Läuft gerade der echte Song (und keine Werbung)?
@@ -84,15 +97,25 @@ function looksLikeSong() {
   } catch { return false; }
 }
 
-function soundLabel() {
-  try { return player.isMuted() ? "Ton aus" : "Ton an"; } catch { return ""; }
+function startRound() {
+  clearInterval(loop);
+  phase = "loading"; waited = 0; sought = false; played = 0; silenced = false; assumeSong = false;
+  pausedTicks = 0; coverPrompt = false;
+  player.setVolume(0);                    // Songanfang nicht hören
+  coverEl.style.display = "flex";
+  coverEl.textContent = COVER_TEXT;
+  titleEl.textContent = "";
+  songTitle = "";
+  btn.style.display = "none";
+  statusEl.textContent = "Lade …";
+  navigator.wakeLock?.request("screen").then((l) => { wakeLock = l; }).catch(() => {});
+  loop = setInterval(tick, TICK_MS);
 }
 
-function endRound(msg, label) {
+function endRound(msg, again) {
   clearInterval(loop);
-  phase = "idle";
-  btn.disabled = false;
-  if (label) btn.textContent = label;
+  phase = "done";
+  btn.style.display = again ? "inline-block" : "none";
   statusEl.textContent = msg;
   coverEl.style.display = "flex";
   coverEl.textContent = "▶️ Tippen zum Starten";
@@ -101,38 +124,12 @@ function endRound(msg, label) {
 
 function finish() {
   player.pauseVideo();
-  endRound("⏸️ Pausiert", "🔁 Nochmal (neue Stelle)");
+  endRound("⏸️ Pausiert – zum Wiederholen auf das Video tippen", true);
   coverEl.style.display = "none";   // Video aufdecken
   titleEl.textContent = songTitle;  // Titel anzeigen
 }
 
-// Mobile Browser erlauben Autoplay nur nach einem Tipp -> Button
-function start() {
-  clearInterval(loop);
-  phase = "loading"; waited = 0; sought = false; played = 0; adMuted = false; assumeSong = false; pausedTicks = 0; coverPrompt = false;
-  btn.disabled = true;
-  statusEl.textContent = "Lade …";
-  coverEl.style.display = "flex";
-  coverEl.textContent = "🎵 Welcher Song ist das?";
-  titleEl.textContent = "";
-  songTitle = "";
-  player.mute();       // stumm starten, damit man den Songanfang nicht hört
-  player.playVideo();
-  navigator.wakeLock?.request("screen").then((l) => { wakeLock = l; }).catch(() => {});
-  loop = setInterval(tick, TICK_MS);
-}
-
-btn.addEventListener("click", start);
-// Der ganze Videobereich ist eine große Start-Fläche
-coverEl.addEventListener("click", () => {
-  if (phase === "idle" && !btn.disabled) { start(); return; }
-  if (phase === "playing") {          // echter Tipp -> Ton einschalten
-    adMuted = false;
-    player.unMute();
-    player.setVolume(100);
-    if (player.getPlayerState() !== YT.PlayerState.PLAYING) player.playVideo();
-  }
-});
+btn.addEventListener("click", () => location.reload());
 
 function tick() {
   const state = player.getPlayerState();
@@ -141,7 +138,7 @@ function tick() {
   if (phase === "loading") {
     waited += TICK_MS / 1000;
     if (waited > GIVE_UP_S && state !== PLAYING) {
-      endRound("Wiedergabe startet nicht – bitte nochmal tippen.", "▶️ Nochmal versuchen");
+      endRound("Wiedergabe startet nicht – bitte nochmal tippen.", true);
       return;
     }
     if (state !== PLAYING) return;
@@ -163,36 +160,39 @@ function tick() {
     if (Date.now() - seekedAt < 800) return;  // kurz warten, bis der Sprung angekommen ist
     phase = "playing";
     played = 0;
-    player.unMute();
+    player.setVolume(100);
+    try { if (player.isMuted()) player.unMute(); } catch {}
     songTitle = player.getVideoData().title || "";
     if (SHOW_TITLE_IMMEDIATELY) titleEl.textContent = songTitle;
-    coverEl.textContent = COVER_HINT;
-    statusEl.textContent = `▶️ Läuft (${SNIPPET_S} s)`;
+    statusEl.textContent = `▶️ Läuft – noch ${SNIPPET_S} s`;
     return;
   }
 
   if (phase === "playing") {
     if (state === YT.PlayerState.ENDED) { finish(); return; }
     if (state !== PLAYING) {
-      // Manche Browser (z. B. DuckDuckGo auf Android) pausieren das Video, sobald der Ton per Code
-      // eingeschaltet wird. Dann hilft nur ein echter Tipp des Nutzers.
+      // Angehalten (z. B. durch einen Tipp): der nächste Tipp geht direkt an den Player und setzt fort
       if (state === YT.PlayerState.PAUSED && ++pausedTicks * TICK_MS >= 1000) {
         coverPrompt = true;
-        coverEl.textContent = "🔊 Tippen zum Fortsetzen";
-        statusEl.textContent = "Der Browser hat angehalten – bitte auf das Video tippen.";
+        coverEl.textContent = "👆 Tippen zum Fortsetzen";
+        statusEl.textContent = "Angehalten – auf das Feld tippen, um fortzusetzen.";
       }
       return;
     }
     pausedTicks = 0;
-    if (coverPrompt) { coverPrompt = false; coverEl.textContent = COVER_HINT; }
+    if (coverPrompt) { coverPrompt = false; coverEl.textContent = COVER_TEXT; }
 
     if (looksLikeSong()) {
-      if (adMuted) { player.unMute(); adMuted = false; }
-      played += TICK_MS / 1000;           // nur echte Songzeit zählt, Werbung nicht
-      statusEl.textContent = `▶️ Läuft – noch ${Math.max(0, Math.ceil(SNIPPET_S - played))} s · ${soundLabel()}`;
+      if (silenced) { player.setVolume(100); silenced = false; }
+      try {                                // Lautstärke sicherstellen
+        if (player.getVolume() < 100) player.setVolume(100);
+        if (player.isMuted()) player.unMute();
+      } catch {}
+      played += TICK_MS / 1000;            // nur echte Songzeit zählt, Werbung nicht
+      statusEl.textContent = `▶️ Läuft – noch ${Math.max(0, Math.ceil(SNIPPET_S - played))} s`;
       if (played >= SNIPPET_S) finish();
     } else {
-      if (!adMuted) { player.mute(); adMuted = true; }
+      if (!silenced) { player.setVolume(0); silenced = true; }  // Werbung leise
       statusEl.textContent = "Werbung läuft – gleich geht's weiter …";
     }
   }
