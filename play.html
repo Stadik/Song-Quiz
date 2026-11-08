@@ -8,10 +8,10 @@
   :root { color-scheme: light dark; }
   body { font-family: system-ui, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px 16px; text-align: center; }
   #playerWrap { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 12px; overflow: hidden; }
-  /* Die Abdeckung ist nur optisch: Berührungen gehen "durch" direkt an den YouTube-Player.
-     Nur ein Tipp direkt im Player zählt für den Browser als echte Nutzeraktion (Ton/Autoplay). */
+  /* Die Abdeckung fängt Tipps ab (so landet man nie versehentlich auf einer Werbung).
+     Nur wenn der Browser einen Tipp direkt im Player verlangt, lässt sie Tipps kurz "durch". */
   #cover { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; text-align: center; padding: 16px;
-           font-size: 28px; font-weight: 600; color: #fff; pointer-events: none; white-space: pre-line;
+           font-size: 28px; font-weight: 600; color: #fff; cursor: pointer; white-space: pre-line;
            background: linear-gradient(135deg, #e62117, #7b1fa2); }
   #playBtn { font-size: 18px; padding: 14px 32px; border: 0; border-radius: 40px; background: #e62117; color: #fff; cursor: pointer; margin: 20px 0 8px; }
   #title { font-size: 20px; font-weight: 600; min-height: 1.4em; margin-top: 12px; }
@@ -43,7 +43,17 @@ const statusEl = document.getElementById("status");
 const titleEl = document.getElementById("title");
 const coverEl = document.getElementById("cover");
 
-let player, phase = "init", loop = null, wakeLock = null;
+// Manche Browser (z. B. DuckDuckGo auf Android) pausieren das Video, wenn der Ton per Code eingeschaltet wird.
+// Dort braucht es einen Tipp direkt im Player. Das merkt sich die Seite, damit es beim nächsten Mal gleich klappt.
+let directTap = false;
+try { directTap = localStorage.getItem("ytDirectTap") === "1"; } catch {}
+function rememberDirectTap() {
+  directTap = true;
+  try { localStorage.setItem("ytDirectTap", "1"); } catch {}
+}
+function setPassThrough(on) { coverEl.style.pointerEvents = on ? "none" : "auto"; }
+
+let player, phase = "init", mode = "scripted", loop = null, wakeLock = null;
 let songTitle = "", pausedTicks = 0, coverPrompt = false;
 let waited = 0, sought = false, seekedAt = 0, played = 0, silenced = false, assumeSong = false;
 
@@ -68,17 +78,25 @@ window.onYouTubeIframeAPIReady = () => {
 };
 
 function onReady() {
-  // Lautlos vorbereiten. Lautstärke 0 statt "stumm": das darf der Browser später wieder anheben,
-  // das Aufheben einer Stummschaltung per Code wird dagegen oft blockiert (z. B. DuckDuckGo).
-  player.setVolume(0);
   phase = "ready";
+  if (directTap) { player.setVolume(0); setPassThrough(true); } else { setPassThrough(false); }
   coverEl.textContent = "▶️ Tippen zum Starten";
   statusEl.textContent = "Bereit – einfach auf das Feld tippen";
 }
 
-// Der Nutzer tippt direkt in den Player -> Wiedergabe beginnt -> Runde starten
+// Tipp direkt in den Player (nur im Direkt-Modus bzw. beim Wiederholen nach dem Aufdecken)
 function onStateChange(e) {
-  if (e.data === YT.PlayerState.PLAYING && (phase === "ready" || phase === "done")) startRound();
+  if (e.data === YT.PlayerState.PLAYING && (phase === "ready" || phase === "done")) beginRound("direct");
+}
+
+// Normalfall: Tipp auf die Abdeckung startet den Player per Code (stumm, Ton kommt nach dem Sprung)
+coverEl.addEventListener("click", () => { if (phase === "ready" && !directTap) startScripted(); });
+btn.addEventListener("click", () => { if (directTap) location.reload(); else startScripted(); });
+
+function startScripted() {
+  beginRound("scripted");
+  player.mute();       // stumm starten, damit man den Songanfang nicht hört
+  player.playVideo();
 }
 
 function onError(e) {
@@ -97,11 +115,13 @@ function looksLikeSong() {
   } catch { return false; }
 }
 
-function startRound() {
+function beginRound(m) {
   clearInterval(loop);
+  mode = m;
   phase = "loading"; waited = 0; sought = false; played = 0; silenced = false; assumeSong = false;
   pausedTicks = 0; coverPrompt = false;
-  player.setVolume(0);                    // Songanfang nicht hören
+  if (mode === "direct") player.setVolume(0);   // Songanfang nicht hören
+  setPassThrough(false);                         // Tipps abfangen (keine versehentlichen Klicks auf Werbung)
   coverEl.style.display = "flex";
   coverEl.textContent = COVER_TEXT;
   titleEl.textContent = "";
@@ -128,8 +148,6 @@ function finish() {
   coverEl.style.display = "none";   // Video aufdecken
   titleEl.textContent = songTitle;  // Titel anzeigen
 }
-
-btn.addEventListener("click", () => location.reload());
 
 function tick() {
   const state = player.getPlayerState();
@@ -161,7 +179,7 @@ function tick() {
     phase = "playing";
     played = 0;
     player.setVolume(100);
-    try { if (player.isMuted()) player.unMute(); } catch {}
+    if (mode === "scripted") player.unMute();   // hier pausieren manche Browser (-> Hinweis unten)
     songTitle = player.getVideoData().title || "";
     if (SHOW_TITLE_IMMEDIATELY) titleEl.textContent = songTitle;
     statusEl.textContent = `▶️ Läuft – noch ${SNIPPET_S} s`;
@@ -171,16 +189,18 @@ function tick() {
   if (phase === "playing") {
     if (state === YT.PlayerState.ENDED) { finish(); return; }
     if (state !== PLAYING) {
-      // Angehalten (z. B. durch einen Tipp): der nächste Tipp geht direkt an den Player und setzt fort
-      if (state === YT.PlayerState.PAUSED && ++pausedTicks * TICK_MS >= 1000) {
+      // Browser hat angehalten: ein Tipp direkt in den Player setzt fort
+      if (state === YT.PlayerState.PAUSED && ++pausedTicks * TICK_MS >= 1000 && !coverPrompt) {
         coverPrompt = true;
+        if (mode === "scripted") rememberDirectTap();   // nächstes Mal gleich im Direkt-Modus starten
+        setPassThrough(true);
         coverEl.textContent = "👆 Tippen zum Fortsetzen";
-        statusEl.textContent = "Angehalten – auf das Feld tippen, um fortzusetzen.";
+        statusEl.textContent = "Angehalten – einmal auf das Feld tippen, um fortzusetzen.";
       }
       return;
     }
     pausedTicks = 0;
-    if (coverPrompt) { coverPrompt = false; coverEl.textContent = COVER_TEXT; }
+    if (coverPrompt) { coverPrompt = false; setPassThrough(false); coverEl.textContent = COVER_TEXT; }
 
     if (looksLikeSong()) {
       if (silenced) { player.setVolume(100); silenced = false; }
