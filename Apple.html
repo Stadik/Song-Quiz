@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Song-Ratespiel</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 420px; margin: 0 auto; padding: 24px 16px; text-align: center; }
+  #stage { width: 100%; aspect-ratio: 1 / 1; border-radius: 16px; overflow: hidden; position: relative; background: #222; }
+  #cover { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box;
+           font-size: 30px; font-weight: 700; color: #fff; cursor: pointer; white-space: pre-line;
+           background: linear-gradient(135deg, #e62117, #7b1fa2); }
+  #cover[hidden] { display: none; }
+  #art { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #art[hidden] { display: none; }
+  #bar { height: 8px; border-radius: 4px; background: rgba(128,128,128,.3); margin: 16px 0 4px; overflow: hidden; }
+  #fill { height: 100%; width: 0; background: #e62117; }
+  #info { margin-top: 18px; }
+  #year { font-size: 44px; font-weight: 800; line-height: 1.1; }
+  #title { font-size: 22px; font-weight: 700; margin-top: 6px; }
+  #artist { font-size: 18px; opacity: .75; margin-top: 2px; }
+  #status { font-size: 14px; opacity: .7; min-height: 1.4em; margin-top: 8px; }
+  button { font-size: 18px; padding: 14px 28px; border: 0; border-radius: 40px; background: #e62117; color: #fff; cursor: pointer; margin: 12px 6px 0; }
+  button.secondary { background: #555; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <div id="cover">Lade Hörprobe …</div>
+  <img id="art" alt="Cover" hidden>
+</div>
+<div id="bar" hidden><div id="fill"></div></div>
+<div id="info" hidden>
+  <div id="year"></div>
+  <div id="title"></div>
+  <div id="artist"></div>
+</div>
+<div id="status"></div>
+<button id="revealBtn" class="secondary" hidden>👀 Auflösen</button>
+<button id="againBtn" hidden>🔁 Nochmal anhören</button>
+
+<script>
+// URL-Parameter: ?a=APPLE_TRACK_ID&y=JAHR&c=LAND
+const params = new URLSearchParams(location.search);
+const TRACK_ID = (params.get("a") || "").replace(/\D/g, "");
+const COUNTRY = /^[A-Za-z]{2}$/.test(params.get("c") || "") ? params.get("c").toUpperCase() : "AT";
+const YEAR_PARAM = (params.get("y") || "").slice(0, 12);
+
+const $ = (id) => document.getElementById(id);
+const coverEl = $("cover"), artEl = $("art"), barEl = $("bar"), fillEl = $("fill"), infoEl = $("info");
+const yearEl = $("year"), titleEl = $("title"), artistEl = $("artist"), statusEl = $("status");
+const revealBtn = $("revealBtn"), againBtn = $("againBtn");
+
+let audio, track, phase = "loading";
+const setStatus = (t) => { statusEl.textContent = t; };
+
+function fail(msg) {
+  phase = "error";
+  coverEl.textContent = "⚠️";
+  setStatus(msg);
+}
+
+// Apple liefert die Daten per JSONP (normale Anfragen blockiert der Browser wegen CORS)
+function jsonp(url, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const name = "__itunes_cb_" + Date.now();
+    const s = document.createElement("script");
+    const cleanup = () => { delete window[name]; s.remove(); clearTimeout(timer); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error("Zeitüberschreitung")); }, timeoutMs);
+    window[name] = (data) => { cleanup(); resolve(data); };
+    s.onerror = () => { cleanup(); reject(new Error("Netzwerkfehler")); };
+    s.src = url + (url.includes("?") ? "&" : "?") + "callback=" + name;
+    document.head.appendChild(s);
+  });
+}
+
+async function load() {
+  if (!TRACK_ID) { fail("Ungültiger Link: Song-Nummer fehlt."); return; }
+  try {
+    const data = await jsonp(`https://itunes.apple.com/lookup?id=${TRACK_ID}&country=${COUNTRY}`);
+    track = (data.results || []).find((r) => r.previewUrl);
+    if (!track) { fail("Für diesen Song gibt es keine Hörprobe."); return; }
+  } catch (e) {
+    fail(`Apple ist gerade nicht erreichbar (${e.message}).`);
+    return;
+  }
+  audio = new Audio();
+  audio.preload = "auto";
+  audio.src = track.previewUrl.replace(/^http:/, "https:");
+  audio.addEventListener("timeupdate", onTime);
+  audio.addEventListener("ended", reveal);
+  audio.addEventListener("error", () => { if (phase !== "revealed") fail("Die Hörprobe konnte nicht geladen werden."); });
+  phase = "ready";
+  coverEl.textContent = "▶️ Tippen zum Starten";
+  setStatus("Bereit");
+}
+
+function play() {
+  phase = "playing";
+  coverEl.textContent = "🎵 Welcher Song ist das?";
+  barEl.hidden = false;
+  revealBtn.hidden = false;
+  againBtn.hidden = true;
+  fillEl.style.width = "0%";
+  if (audio.currentTime > 0) audio.currentTime = 0;
+  // play() direkt im Tipp-Handler: erlaubt in allen Browsern, auch mit Ton
+  const p = audio.play();
+  if (p && p.catch) p.catch(() => {
+    phase = "ready";
+    coverEl.textContent = "▶️ Tippen zum Starten";
+    setStatus("Der Browser hat die Wiedergabe blockiert – bitte nochmal tippen.");
+  });
+}
+
+function onTime() {
+  if (phase !== "playing") return;
+  const d = audio.duration || 30;
+  fillEl.style.width = Math.min(100, (audio.currentTime / d) * 100) + "%";
+  setStatus(`▶️ Läuft – noch ${Math.max(0, Math.ceil(d - audio.currentTime))} s`);
+}
+
+function reveal() {
+  if (phase === "revealed" || phase === "error") return;
+  phase = "revealed";
+  audio.pause();
+  coverEl.hidden = true;
+  if (track.artworkUrl100) {
+    artEl.src = track.artworkUrl100.replace(/\/\d+x\d+bb\./, "/400x400bb.");
+    artEl.hidden = false;
+  }
+  yearEl.textContent = YEAR_PARAM || (track.releaseDate || "").slice(0, 4);
+  titleEl.textContent = track.trackName || "";
+  artistEl.textContent = track.artistName || "";
+  infoEl.hidden = false;
+  barEl.hidden = true;
+  revealBtn.hidden = true;
+  againBtn.hidden = false;
+  setStatus("");
+}
+
+coverEl.addEventListener("click", () => { if (phase === "ready") play(); });
+revealBtn.addEventListener("click", reveal);
+againBtn.addEventListener("click", () => {
+  artEl.hidden = true;
+  infoEl.hidden = true;
+  coverEl.hidden = false;
+  play();
+});
+
+load();
+</script>
+</body>
+</html>
